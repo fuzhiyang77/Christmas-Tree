@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D 圣诞树 (鼠标交互版)</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #050505; font-family: sans-serif; }
+        #canvas-container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+        
+        #hint {
+            position: absolute; bottom: 30px; width: 100%; text-align: center;
+            color: rgba(255,215,0, 0.6); font-size: 16px; pointer-events: none; z-index: 10;
+            text-shadow: 0 0 10px rgba(255,215,0,0.3);
+        }
+        .highlight { color: #fff; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+    <div id="hint">
+        <span class="highlight">按住左键</span> 炸裂粒子 &nbsp; • &nbsp; 
+        <span class="highlight">滚轮</span> 缩放 &nbsp; • &nbsp; 
+        <span class="highlight">拖拽</span> 旋转
+    </div>
+    <div id="canvas-container"></div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        let scene, camera, renderer, particles, ornamentParticles, textSprite;
+        let targetPositions, ornamentTargets;
+        const PARTICLE_COUNT = 15000;
+        const ORNAMENT_COUNT = 800;
+        
+        // 交互状态
+        let interaction = {
+            scale: 1.0,
+            spread: 0.0,
+            isMouseDown: false
+        };
+
+        // 1. 纹理生成
+        function createGlowTexture() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 32; canvas.height = 32;
+            const ctx = canvas.getContext('2d');
+            const grad = ctx.createRadialGradient(16,16,0, 16,16,16);
+            grad.addColorStop(0, 'rgba(255, 255, 255, 1)');
+            grad.addColorStop(0.4, 'rgba(255, 215, 0, 0.6)');
+            grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+            ctx.fillStyle = grad;
+            ctx.fillRect(0,0,32,32);
+            return new THREE.CanvasTexture(canvas);
+        }
+
+        function createStarTexture() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 64; canvas.height = 64;
+            const ctx = canvas.getContext('2d');
+            ctx.translate(32, 32);
+            
+            // 发光背景
+            const grad = ctx.createRadialGradient(0,0,0, 0,0,28);
+            grad.addColorStop(0, 'rgba(255,255,255,0.9)');
+            grad.addColorStop(1, 'rgba(255,255,255,0)');
+            ctx.fillStyle = grad;
+            ctx.beginPath(); ctx.arc(0,0,28,0,Math.PI*2); ctx.fill();
+
+            // 星星
+            ctx.fillStyle = "#FFFFFF";
+            for(let i=0; i<6; i++) {
+                ctx.beginPath();
+                ctx.moveTo(0,0); ctx.lineTo(0, -20);
+                ctx.lineWidth = 3; ctx.strokeStyle = "white"; ctx.stroke();
+                ctx.rotate(Math.PI / 3);
+            }
+            return new THREE.CanvasTexture(canvas);
+        }
+
+        function createTextTexture() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 1024; canvas.height = 256;
+            const ctx = canvas.getContext('2d');
+            ctx.shadowColor = "#FFD700"; ctx.shadowBlur = 25;
+            ctx.font = "italic bold 100px 'Times New Roman', serif";
+            ctx.textAlign = "center"; ctx.textBaseline = "middle";
+            const gradient = ctx.createLinearGradient(0, 0, 1024, 0);
+            gradient.addColorStop(0, "#DAA520");
+            gradient.addColorStop(0.5, "#FFF");
+            gradient.addColorStop(1, "#DAA520");
+            ctx.fillStyle = gradient;
+            ctx.fillText("Merry Christmas", 512, 128);
+            return new THREE.CanvasTexture(canvas);
+        }
+
+        // 2. 初始化
+        function init() {
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x050505, 0.02);
+
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 5, 40);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+            const controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.autoRotate = true;
+            controls.autoRotateSpeed = 0.8;
+            controls.enableZoom = false; // 禁用自带缩放，改用自定义逻辑
+
+            createParticles();
+            createOrnaments();
+            createTitle();
+            setupEvents();
+            animate();
+        }
+
+        function createParticles() {
+            const geometry = new THREE.BufferGeometry();
+            const positions = new Float32Array(PARTICLE_COUNT * 3);
+            targetPositions = new Float32Array(PARTICLE_COUNT * 3);
+            const colors = new Float32Array(PARTICLE_COUNT * 3);
+            const c1 = new THREE.Color(0xFFD700);
+            const c2 = new THREE.Color(0xFF6347);
+
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                positions[i*3] = (Math.random()-0.5)*100;
+                positions[i*3+1] = (Math.random()-0.5)*100;
+                positions[i*3+2] = (Math.random()-0.5)*100;
+
+                const t = Math.random(); 
+                const angle = t * Math.PI * 18 + Math.random(); 
+                const radius = 13 * (1 - t) + Math.random(); 
+                
+                targetPositions[i*3] = Math.cos(angle) * radius + (Math.random()-0.5);
+                targetPositions[i*3+1] = (t * 28) - 12;
+                targetPositions[i*3+2] = Math.sin(angle) * radius + (Math.random()-0.5);
+
+                const c = Math.random() > 0.7 ? c2 : c1;
+                colors[i*3] = c.r; colors[i*3+1] = c.g; colors[i*3+2] = c.b;
+            }
+
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+            particles = new THREE.Points(geometry, new THREE.PointsMaterial({
+                size: 0.3, map: createGlowTexture(), vertexColors: true,
+                blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, opacity: 0.9
+            }));
+            scene.add(particles);
+        }
+
+        function createOrnaments() {
+            const geometry = new THREE.BufferGeometry();
+            const pos = new Float32Array(ORNAMENT_COUNT * 3);
+            ornamentTargets = new Float32Array(ORNAMENT_COUNT * 3);
+
+            for (let i = 0; i < ORNAMENT_COUNT; i++) {
+                pos[i*3] = (Math.random()-0.5)*50;
+                pos[i*3+1] = (Math.random()-0.5)*50;
+                pos[i*3+2] = (Math.random()-0.5)*50;
+
+                const t = Math.random();
+                const angle = Math.random() * Math.PI * 2;
+                const radius = 14 * (1 - t) + 1.5; 
+                ornamentTargets[i*3] = Math.cos(angle) * radius;
+                ornamentTargets[i*3+1] = (t * 28) - 12;
+                ornamentTargets[i*3+2] = Math.sin(angle) * radius;
+            }
+            geometry.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+            ornamentParticles = new THREE.Points(geometry, new THREE.PointsMaterial({
+                size: 1.2, map: createStarTexture(), color: 0xFFFFFF,
+                blending: THREE.AdditiveBlending, depthWrite: false, transparent: true
+            }));
+            scene.add(ornamentParticles);
+        }
+
+        function createTitle() {
+            const mat = new THREE.SpriteMaterial({ map: createTextTexture(), transparent: true, opacity: 0 });
+            textSprite = new THREE.Sprite(mat);
+            textSprite.scale.set(25, 6.25, 1);
+            textSprite.position.set(0, 19, 0);
+            scene.add(textSprite);
+        }
+
+        // 3. 事件监听 (替代摄像头)
+        function setupEvents() {
+            // 鼠标按下炸开
+            window.addEventListener('mousedown', () => interaction.isMouseDown = true);
+            window.addEventListener('mouseup', () => interaction.isMouseDown = false);
+            window.addEventListener('touchstart', () => interaction.isMouseDown = true);
+            window.addEventListener('touchend', () => interaction.isMouseDown = false);
+
+            // 滚轮缩放
+            window.addEventListener('wheel', (e) => {
+                interaction.scale += e.deltaY * -0.001;
+                interaction.scale = Math.max(0.2, Math.min(2.0, interaction.scale));
+            });
+            
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+        }
+
+        // 4. 动画循环
+        const clock = new THREE.Clock();
+        
+        function animate() {
+            requestAnimationFrame(animate);
+            const time = clock.getElapsedTime();
+
+            // 目标逻辑
+            const targetSpread = interaction.isMouseDown ? 2.5 : 0.0;
+            interaction.spread += (targetSpread - interaction.spread) * 0.05; // 平滑过渡
+
+            const scale = interaction.scale;
+            const spread = interaction.spread;
+
+            // 更新粒子
+            const pPos = particles.geometry.attributes.position.array;
+            for(let i=0; i<PARTICLE_COUNT; i++) {
+                const ix = i*3;
+                let tx = targetPositions[ix] * scale;
+                let ty = targetPositions[ix+1] * scale;
+                let tz = targetPositions[ix+2] * scale;
+
+                // 炸开逻辑
+                if(spread > 0.01) {
+                    // 加上随机方向的噪音，模拟爆炸
+                    tx += (tx + Math.cos(i)*10) * spread;
+                    ty += (ty + Math.sin(i)*10) * spread;
+                    tz += (tz + Math.cos(i*2)*10) * spread;
+                }
+
+                pPos[ix] += (tx - pPos[ix]) * 0.1;
+                pPos[ix+1] += (ty - pPos[ix+1]) * 0.1;
+                pPos[ix+2] += (tz - pPos[ix+2]) * 0.1;
+            }
+            particles.geometry.attributes.position.needsUpdate = true;
+
+            // 更新装饰物
+            const oPos = ornamentParticles.geometry.attributes.position.array;
+            for(let i=0; i<ORNAMENT_COUNT; i++) {
+                const ix = i*3;
+                let tx = ornamentTargets[ix] * scale;
+                let ty = ornamentTargets[ix+1] * scale;
+                let tz = ornamentTargets[ix+2] * scale;
+
+                if(spread > 0.01) {
+                    tx += tx * spread * 2;
+                    ty += ty * spread * 2;
+                    tz += tz * spread * 2;
+                }
+
+                oPos[ix] += (tx - oPos[ix]) * 0.08;
+                oPos[ix+1] += (ty - oPos[ix+1]) * 0.08;
+                oPos[ix+2] += (tz - oPos[ix+2]) * 0.08;
+            }
+            ornamentParticles.geometry.attributes.position.needsUpdate = true;
+
+            // 标题
+            if(textSprite) {
+                textSprite.position.y = 19 * scale;
+                textSprite.material.opacity = Math.max(0, 1 - spread); // 炸开时隐藏标题
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        init();
+    </script>
+</body>
+</html>
